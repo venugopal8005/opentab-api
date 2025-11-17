@@ -6,10 +6,10 @@ const User = require('../models/User');
 const generateTokens = async (user) => {
   const accessToken = user.generateAccessToken();
   const refreshToken = user.generateRefreshToken();
-  
+
   user.refreshToken = refreshToken;
   await user.save();
-  
+
   return { accessToken, refreshToken };
 };
 
@@ -26,8 +26,8 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Find user in database
-    const user = await User.findOne({ email });
+    // Find user in database with explicit password select
+    const user = await User.findOne({ email }).select('+hashedPassword');
     if (!user) {
       return res.status(400).json({
         success: false,
