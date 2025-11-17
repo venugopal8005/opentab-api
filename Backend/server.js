@@ -1,78 +1,149 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const morgan = require('morgan');
 const connectDB = require('./config/db');
+const { logger, morganStream } = require('./config/logger');
+const { errorHandler } = require('./middleware/errorHandler');
+const { apiLimiter, authLimiter } = require('./middleware/rateLimiter'); // ← ADD authLimiter here
 const authRoutes = require('./routes/auth');
 
-// Load environment variables from .env file
+// ===== STEP 1: ENVIRONMENT SETUP =====
 dotenv.config();
 
-// Connect to MongoDB
+// Validate required environment variables
+const requiredEnvVars = [
+  'MONGODB_URI',
+  'ACCESS_TOKEN_SECRET',
+  'REFRESH_TOKEN_SECRET'
+];
+
+requiredEnvVars.forEach((envVar) => {
+  if (!process.env[envVar]) {
+    logger.error(`Missing required environment variable: ${envVar}`);
+    process.exit(1);
+  }
+});
+
+// ===== STEP 2: DATABASE CONNECTION =====
 connectDB();
 
-// Create Express application
+// ===== STEP 3: EXPRESS APP SETUP =====
 const app = express();
 
-// Middleware - Process JSON requests
-app.use(express.json());
+// ===== MIDDLEWARE (ORDER CRITICAL) =====
 
-// Middleware - Enable CORS for frontend
-app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+// 1. Trust proxy (for rate limiting behind reverse proxies)
+app.set('trust proxy', 1);
+
+// 2. CORS
+const corsOptions = {
+  origin: process.env.FRONTEND_URL || '*',
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+  optionsSuccessStatus: 200
+};
+app.use(cors(corsOptions));
 
-// Basic route to test server
+// 3. Body Parser
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// 4. Morgan HTTP Logging (piped to Winston)
+app.use(morgan(
+  ':method :url :status :res[content-length] - :response-time ms',
+  { stream: morganStream }
+));
+
+// 5. Rate Limiting (before routes)
+app.use('/api/', apiLimiter);
+app.use('/api/auth/login', authLimiter);      // ← ADD THIS LINE
+app.use('/api/auth/register', authLimiter);   // ← ADD THIS LINE
+
+// ===== ROUTES =====
+
+// Health Check (no auth, no rate limit)
+app.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
+
+// Root
 app.get('/', (req, res) => {
   res.json({
     success: true,
-    message: 'OpenTab Backend API is running successfully! 🎉',
+    message: 'OpenTab Backend API - Production Ready',
     version: '1.0.0',
+    environment: process.env.NODE_ENV || 'development',
     endpoints: {
-      register: '/api/auth/register',
-      login: '/api/auth/login',
-      test: '/api/auth/test'
+      health: 'GET /health',
+      register: 'POST /api/auth/register',
+      login: 'POST /api/auth/login',
+      refresh: 'POST /api/auth/refresh',
+      logout: 'POST /api/auth/logout',
+      me: 'GET /api/auth/me'
+    },
+    features: {
+      logging: 'Winston + Morgan',
+      rateLimiting: 'Enabled',
+      errorHandling: 'Centralized',
+      security: 'JWT + Bcrypt'
     }
   });
 });
 
-// Mount authentication routes
+// Auth Routes
 app.use('/api/auth', authRoutes);
 
-// Error handling middleware (catches all errors)
-app.use((err, req, res, next) => {
-  console.error('❌ Server Error:', err.stack);
-  res.status(500).json({
-    success: false,
-    message: 'Something went wrong on the server!',
-    error: process.env.NODE_ENV === 'development' ? err.message : 'Internal Server Error'
-  });
-});
+// ===== ERROR HANDLING =====
 
-// Handle 404 (route not found)
+// 404 Handler
 app.use('*', (req, res) => {
+  logger.warn(JSON.stringify({
+    message: 'Route not found',
+    method: req.method,
+    url: req.originalUrl,
+    ip: req.ip
+  }));
+
   res.status(404).json({
     success: false,
-    message: `Route ${req.originalUrl} not found`,
-    available: {
-      register: 'POST /api/auth/register',
-      login: 'POST /api/auth/login'
-    }
+    message: `Route ${req.method} ${req.originalUrl} not found`
   });
 });
 
-// Get the port from environment or use 5000
+// Global Error Handler (MUST BE LAST)
+app.use(errorHandler);
+
+// ===== GRACEFUL SHUTDOWN =====
+process.on('SIGTERM', () => {
+  logger.info('SIGTERM received. Shutting down gracefully...');
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  logger.info('SIGINT received. Shutting down gracefully...');
+  process.exit(0);
+});
+
+// ===== SERVER START =====
 const PORT = process.env.PORT || 5000;
 
-// Start the server
-app.listen(PORT, () => {
-  console.log(`🚀 Server is running on http://localhost:${PORT}`);
-  console.log(`📊 Available routes:`);
-  console.log(`   POST http://localhost:${PORT}/api/auth/register`);
-  console.log(`   POST http://localhost:${PORT}/api/auth/login`);
-  console.log(`   GET  http://localhost:${PORT}/api/auth/test`);
-  console.log(`\n📱 Frontend should connect to: http://localhost:${PORT}`);
-  console.log(`\n🎯 Set NEXT_PUBLIC_API_URL=http://localhost:${PORT} in your Next.js .env.local`);
+const server = app.listen(PORT, () => {
+  logger.info(`🚀 Server running on port ${PORT}`);
+  logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  logger.info(`📊 CORS: ${corsOptions.origin}`);
+  logger.info(`🛡️  Rate Limiting: Enabled (API: 100/15min, Auth: 6/15min)`); // ← Updated log
+  logger.info(`📝 Logging: Winston + Morgan`);
 });
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (err) => {
+  logger.error(`Unhandled Rejection: ${err.message}`);
+  server.close(() => process.exit(1));
+});
+
+module.exports = app;

@@ -2,128 +2,138 @@ const express = require('express');
 const router = express.Router();
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
+const { authenticateToken } = require('../middleware/auth');
 
-// Register - Create new user
-router.post('/register', async (req, res) => {
+// Import register and login routes
+const registerRoute = require('./register');
+const loginRoute = require('./login');
+
+// Mount register and login routes
+router.use('/register', registerRoute);  // POST /api/auth/register
+router.use('/login', loginRoute);        // POST /api/auth/login
+
+// Helper: Generate both tokens
+const generateTokens = async (user) => {
+  const accessToken = user.generateAccessToken();
+  const refreshToken = user.generateRefreshToken();
+  
+  user.refreshToken = refreshToken;
+  await user.save();
+  
+  return { accessToken, refreshToken };
+};
+
+// Refresh Token - Get new access token
+router.post('/refresh', async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { refreshToken } = req.body;
 
-    // Validate input
-    if (!name || !email || !password) {
-      return res.status(400).json({
+    if (!refreshToken) {
+      return res.status(401).json({
         success: false,
-        message: 'Please provide all fields: name, email, password'
+        message: 'Refresh token required'
       });
     }
 
-    // Check if user already exists
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({
+    // Verify refresh token
+    let decoded;
+    try {
+      decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
+    } catch (error) {
+      return res.status(403).json({
         success: false,
-        message: 'User already exists with this email'
+        message: 'Invalid or expired refresh token'
       });
     }
 
-    // Create new user (password will be hashed automatically by pre-save hook)
-    const user = new User({ 
-      name, 
-      email, 
-      hashedPassword: password 
-    });
-
-    await user.save();
-
-    // Generate JWT token
-    const token = jwt.sign(
-      { userId: user._id }, 
-      process.env.JWT_SECRET, 
-      { expiresIn: '24h' }
-    );
-
-    // Send response without password
-    res.status(201).json({
-      success: true,
-      message: 'User created successfully',
-      token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email
-      }
-    });
-
-  } catch (error) {
-    console.error('Register error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error during registration',
-      error: error.message
-    });
-  }
-});
-
-// Login - Authenticate existing user
-router.post('/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-
-    // Validate input
-    if (!email || !password) {
-      return res.status(400).json({
+    // Find user and verify token matches database
+    const user = await User.findById(decoded.userId);
+    
+    if (!user || user.refreshToken !== refreshToken) {
+      return res.status(403).json({
         success: false,
-        message: 'Please provide email and password'
+        message: 'Invalid refresh token'
       });
     }
 
-    // Find user in database
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid credentials'
-      });
-    }
+    // Generate new tokens
+    const { accessToken, refreshToken: newRefreshToken } = await generateTokens(user);
 
-    // Check password
-    const isPasswordValid = await user.verifyPassword(password);
-    if (!isPasswordValid) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid credentials'
-      });
-    }
-
-    // Generate JWT token
-    const token = jwt.sign(
-      { userId: user._id }, 
-      process.env.JWT_SECRET, 
-      { expiresIn: '24h' }
-    );
-
-    // Send successful response
     res.json({
       success: true,
-      message: 'Login successful',
-      token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email
-      }
+      message: 'Token refreshed successfully',
+      accessToken,
+      refreshToken: newRefreshToken
     });
 
   } catch (error) {
-    console.error('Login error:', error);
+    console.error('Refresh token error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error during login',
+      message: 'Server error during token refresh',
       error: error.message
     });
   }
 });
 
-// Test route to check server status
+// Logout - Clear refresh token
+router.post('/logout', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'Refresh token required'
+      });
+    }
+
+    const decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
+    const user = await User.findById(decoded.userId);
+
+    if (user) {
+      user.refreshToken = null;
+      await user.save();
+    }
+
+    res.json({
+      success: true,
+      message: 'Logged out successfully'
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Logout failed',
+      error: error.message
+    });
+  }
+});
+
+// PROTECTED ROUTE - Get current user profile
+router.get('/me', authenticateToken, async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      message: 'User profile retrieved',
+      user: {
+        id: req.user._id,
+        name: req.user.name,
+        email: req.user.email,
+        createdAt: req.user.createdAt,
+        updatedAt: req.user.updatedAt
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching user profile',
+      error: error.message
+    });
+  }
+});
+
+// Test route
 router.get('/test', (req, res) => {
   res.json({
     success: true,
