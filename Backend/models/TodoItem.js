@@ -6,47 +6,73 @@ const todoItemSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: true,
-      unique: true
+      index: true
     },
-    items: {
-      type: [{
-        id: { type: String, required: true },
-        text: { type: String, required: true, maxlength: 200 },
-        status: { 
-          type: String, 
-          enum: ['pending', 'completed', 'archived'],
-          default: 'pending'
-        },
-        priority: {
-          type: String,
-          enum: ['low', 'medium', 'high'],
-          default: 'medium'
-        },
-        createdAt: { type: Date, default: Date.now },
-        completedAt: { type: Date }
-      }],
-      default: [],
-      validate: {
-        validator: function(v) {
-          return v.length <= 200; // Max 200 todos
-        },
-        message: 'Maximum 200 todos allowed'
+
+    // TASK TITLE
+    title: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 200
+    },
+
+    // TASK DESCRIPTION
+    description: {
+      type: String,
+      default: ""
+    },
+
+    // PRIORITY
+    priority: {
+      type: String,
+      enum: ["low", "medium", "high"],
+      default: "medium"
+    },
+
+    // DEADLINE / DUE DATE
+    deadline: {
+      type: Date,
+      default: null
+    },
+
+    // STATUS (3 Columns)
+    status: {
+      type: String,
+      enum: ["todo", "doing", "done"],
+      default: "todo",
+      index: true
+    },
+
+    // ORDERING POSITION WITHIN COLUMN
+    position: {
+      type: Number,
+      default: 0
+    },
+
+    // USER-WRITTEN SUBTASKS
+    subtasks: [
+      {
+        label: { type: String, required: true },
+        completed: { type: Boolean, default: false }
       }
-    }
+    ],
+
+    // KEYWORD TAGS
+    tags: [
+      {
+        type: String,
+        trim: true
+      }
+    ]
   },
-  { 
-    timestamps: { createdAt: false, updatedAt: true },
-    collection: 'todo_items'
+  {
+    timestamps: true,
+    collection: "todo_items"
   }
 );
 
 // ===== INDEXES =====
-userProfileSchema.index({ userId: 1 }, { unique: true });
+todoItemSchema.index({ userId: 1, status: 1, position: 1 });
 
-// ===== INSTANCE METHODS =====
-// Get active todos count (computed field)
-todoItemSchema.methods.getActiveCount = function() {
-  return this.items.filter(item => item.status === 'pending').length;
-};
-
-module.exports = mongoose.model('TodoItem', todoItemSchema);
+module.exports = mongoose.model("TodoItem", todoItemSchema);
